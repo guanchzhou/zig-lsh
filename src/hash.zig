@@ -90,13 +90,21 @@ pub const Hasher = struct {
         return if (s == 0) 1 else 1e-9 * @sqrt(s);
     }
 
-    fn argmax(y: []const f64) usize {
-        const u = unitOf(y);
+    fn argmaxWithUnit(y: []const f64, u: f64) usize {
         var best: usize = 0;
-        for (y, 0..) |v, i| {
-            if (mag(v, u) > mag(y[best], u)) best = i;
+        var best_mag = mag(y[0], u);
+        for (y[1..], 1..) |v, i| {
+            const mv = mag(v, u);
+            if (mv > best_mag) {
+                best = i;
+                best_mag = mv;
+            }
         }
         return best;
+    }
+
+    fn argmax(y: []const f64) usize {
+        return argmaxWithUnit(y, unitOf(y));
     }
 
     fn cpHash(y: []const f64, i: usize) u64 {
@@ -165,6 +173,7 @@ pub const Hasher = struct {
         if (want == 0) return 1;
         const p = self.params;
         var alts: [max_probes * 64]Alt = undefined;
+        var base_hashes: [64]u64 = undefined;
         var count: usize = 0;
         switch (p.family) {
             .hyperplane => {
@@ -178,19 +187,26 @@ pub const Hasher = struct {
                 for (0..p.k) |j| {
                     const y = self.row(j);
                     const u = unitOf(y);
-                    const top = argmax(y);
+                    const top = argmaxWithUnit(y, u);
+                    base_hashes[j] = cpHash(y, top);
+                    const top_mag = mag(y[top], u);
                     // The `want` largest |y_i| other than the maximum, found by repeated selection.
                     var taken: [max_probes]usize = undefined;
                     var r: usize = 0;
                     while (r < want and r + 1 < y.len) : (r += 1) {
                         var best: ?usize = null;
+                        var best_mag: f64 = -1;
                         for (y, 0..) |v, i| {
                             if (i == top) continue;
                             if (std.mem.indexOfScalar(usize, taken[0..r], i) != null) continue;
-                            if (best == null or mag(v, u) > mag(y[best.?], u)) best = i;
+                            const mv = mag(v, u);
+                            if (best == null or mv > best_mag) {
+                                best = i;
+                                best_mag = mv;
+                            }
                         }
                         taken[r] = best.?;
-                        alts[count] = .{ .gap = mag(y[top], u) - mag(y[best.?], u), .pos = j, .rank = r, .coord = best.? };
+                        alts[count] = .{ .gap = top_mag - best_mag, .pos = j, .rank = r, .coord = best.? };
                         count += 1;
                     }
                 }
@@ -199,13 +215,16 @@ pub const Hasher = struct {
         std.mem.sort(Alt, alts[0..count], {}, altLess);
         const n = @min(want, count);
         var hashes: [64]u64 = undefined;
+        if (p.family == .cross_polytope) {
+            @memcpy(hashes[0..p.k], base_hashes[0..p.k]);
+        }
         for (alts[0..n], 1..) |a, o| {
             switch (p.family) {
                 .hyperplane => out[o] = out[0] ^ (@as(u64, 1) << @intCast(a.coord)),
                 .cross_polytope => {
-                    for (0..p.k) |j| hashes[j] = cpHash(self.row(j), argmax(self.row(j)));
                     hashes[a.pos] = cpHash(self.row(a.pos), a.coord);
                     out[o] = self.compose(hashes[0..p.k]);
+                    hashes[a.pos] = base_hashes[a.pos];
                 },
             }
         }

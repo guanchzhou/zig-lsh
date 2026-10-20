@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 - 2026-10-20
+
+- Return `error.TooManyProbes` in `Index.candidates` when `probes >= hash.max_probes` instead of slicing past the stack buffer.
+- Hoist base cross-polytope rotations outside the multi-probe candidate loop in `Hasher.probes` and vectorise `rotate.fwht` with `@Vector(4, f64)`.
+- Add GitHub Actions CI workflow.
+
 ## 0.1.0 - 2026-10-07
 
 - `lsh.rotate`: seeded fast Hadamard rotation (three rounds of random signs).

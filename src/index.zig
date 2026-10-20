@@ -64,6 +64,7 @@ pub fn build(gpa: std.mem.Allocator, data: []const f32, dims: usize, params: has
 /// Ids of every vector sharing a bucket with `x` in any table, probing `probes` extra keys per
 /// table (0 = own key only). Sorted ascending, without duplicates. The caller frees the slice.
 pub fn candidates(gpa: std.mem.Allocator, ix: Index, x: []const f32, probes: usize) Error![]u32 {
+    if (probes >= hash.max_probes) return error.TooManyProbes;
     const h = try hash.Hasher.init(gpa, ix.dims, ix.params);
     defer h.deinit(gpa);
     var seen = try std.DynamicBitSetUnmanaged.initEmpty(gpa, ix.n);
@@ -113,4 +114,5 @@ test "more probes never lose candidates" {
     const b = try candidates(gpa, ix, q, 4);
     defer gpa.free(b);
     for (a) |id| try std.testing.expect(std.mem.indexOfScalar(u32, b, id) != null);
+    try std.testing.expectError(error.TooManyProbes, candidates(gpa, ix, q, hash.max_probes));
 }
