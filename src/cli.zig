@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
     }
     var in_buf: [64 * 1024]u8 = undefined;
     var stdin = std.Io.File.stdin().readerStreaming(init.io, &in_buf);
-    const text = stdin.interface.allocRemaining(arena, .unlimited) catch |e| switch (e) {
+    const text = stdin.interface.allocRemaining(arena, .limited(256 * 1024 * 1024)) catch |e| switch (e) {
         error.ReadFailed => return stdin.err.?,
         else => |x| return x,
     };
@@ -119,14 +119,14 @@ pub fn main(init: std.process.Init) !void {
     if (in.probes + 1 > hash.max_probes) fail("probes must be at most {d}", .{hash.max_probes - 1});
 
     if (std.mem.eql(u8, cmd, "keys")) {
-        const h = try hash.Hasher.init(arena, m.d, params);
+        var h = try hash.Hasher.init(arena, m.d, params);
         var keys: [hash.max_probes]u64 = undefined;
         for (0..in.data.len) |i| {
             const x = m.data[i * m.d ..][0..m.d];
             try out.writeAll("{\"keys\":[");
             for (0..params.tables) |t| {
                 if (t > 0) try out.writeAll(",");
-                try writeHex(out, h.key(x, @intCast(t)));
+                try writeHex(out, try h.key(x, @intCast(t)));
             }
             try out.writeAll("]");
             if (in.probes > 0) {

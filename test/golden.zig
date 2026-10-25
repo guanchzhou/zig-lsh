@@ -35,11 +35,11 @@ test "keys, probes and candidates match the NumPy reference" {
     for (g.cases) |c| {
         const family: hash.Family = if (std.mem.eql(u8, c.family, "hyperplane")) .hyperplane else .cross_polytope;
         const params: hash.Params = .{ .family = family, .k = c.k, .tables = c.tables, .seed = try hex(c.seed) };
-        const h = try hash.Hasher.init(arena, c.d, params);
+        var h = try hash.Hasher.init(arena, c.d, params);
         const data = try arena.alloc(f32, c.data.len * c.d);
         for (c.data, 0..) |row, i| @memcpy(data[i * c.d ..][0..c.d], row);
         for (c.keys, 0..) |row, i| {
-            for (row, 0..) |want, t| try std.testing.expectEqual(try hex(want), h.key(data[i * c.d ..][0..c.d], @intCast(t)));
+            for (row, 0..) |want, t| try std.testing.expectEqual(try hex(want), try h.key(data[i * c.d ..][0..c.d], @intCast(t)));
         }
         const ix = try index.build(arena, data, c.d, params);
         var out: [hash.max_probes]u64 = undefined;

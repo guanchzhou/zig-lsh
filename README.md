@@ -40,7 +40,8 @@ defer gpa.free(cand);
 ```
 
 `lsh.hash.Hasher` gives the keys (`key`) and probe keys (`probes`) of a vector directly, for callers
-that keep their own tables. Both families depend only on a vector's direction, so any positive scale
+that keep their own tables. Both write into the hasher's buffer, so share one hasher across threads
+only through `keyWith` and `probesWith`, which take a scratch buffer of `scratchLen()` values. Both families depend only on a vector's direction, so any positive scale
 gives the same keys.
 
 - **`k` for cross-polytope:** the number of hashes per table, with (2n)^k at most 2^64 for padded length n.

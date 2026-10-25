@@ -43,7 +43,7 @@ pub fn build(gpa: std.mem.Allocator, data: []const f32, dims: usize, params: has
     if (data.len % dims != 0) return error.RaggedData;
     const n = data.len / dims;
     if (n > std.math.maxInt(u32)) return error.TooManyVectors;
-    const h = try hash.Hasher.init(gpa, dims, params);
+    var h = try hash.Hasher.init(gpa, dims, params);
     defer h.deinit(gpa);
     const tables = try gpa.alloc([]const Entry, params.tables);
     var built: usize = 0;
@@ -53,7 +53,8 @@ pub fn build(gpa: std.mem.Allocator, data: []const f32, dims: usize, params: has
     }
     for (0..params.tables) |t| {
         const entries = try gpa.alloc(Entry, n);
-        for (entries, 0..) |*e, i| e.* = .{ .key = h.key(data[i * dims ..][0..dims], @intCast(t)), .id = @intCast(i) };
+        errdefer gpa.free(entries);
+        for (entries, 0..) |*e, i| e.* = .{ .key = try h.key(data[i * dims ..][0..dims], @intCast(t)), .id = @intCast(i) };
         std.mem.sort(Entry, entries, {}, entryLess);
         tables[t] = entries;
         built += 1;
@@ -65,7 +66,8 @@ pub fn build(gpa: std.mem.Allocator, data: []const f32, dims: usize, params: has
 /// table (0 = own key only). Sorted ascending, without duplicates. The caller frees the slice.
 pub fn candidates(gpa: std.mem.Allocator, ix: Index, x: []const f32, probes: usize) Error![]u32 {
     if (probes >= hash.max_probes) return error.TooManyProbes;
-    const h = try hash.Hasher.init(gpa, ix.dims, ix.params);
+    if (x.len != ix.dims) return error.DimensionMismatch;
+    var h = try hash.Hasher.init(gpa, ix.dims, ix.params);
     defer h.deinit(gpa);
     var seen = try std.DynamicBitSetUnmanaged.initEmpty(gpa, ix.n);
     defer seen.deinit(gpa);
@@ -115,4 +117,27 @@ test "more probes never lose candidates" {
     defer gpa.free(b);
     for (a) |id| try std.testing.expect(std.mem.indexOfScalar(u32, b, id) != null);
     try std.testing.expectError(error.TooManyProbes, candidates(gpa, ix, q, hash.max_probes));
+}
+
+test "candidates rejects a query of the wrong width" {
+    const gpa = std.testing.allocator;
+    const data = [_]f32{ 1, 0, 0, 1, -1, 0 };
+    const ix = try build(gpa, &data, 2, .{ .family = .hyperplane, .k = 2, .tables = 2, .seed = 1 });
+    defer ix.deinit(gpa);
+    try std.testing.expectError(error.DimensionMismatch, candidates(gpa, ix, &.{1}, 0));
+    try std.testing.expectError(error.DimensionMismatch, candidates(gpa, ix, &.{ 1, 2, 3 }, 1));
+}
+
+fn buildAlloc(gpa: std.mem.Allocator, family: hash.Family) !void {
+    const data = [_]f32{ 1, 0, 0.5, 0, 1, -0.5, -1, 0, 0.2, 0.3, 0.3, 0.3 };
+    const ix = try build(gpa, &data, 3, .{ .family = family, .k = 1, .tables = 3, .seed = 4 });
+    defer ix.deinit(gpa);
+    const c = try candidates(gpa, ix, data[0..3], 2);
+    gpa.free(c);
+}
+
+test "build and candidates free everything on allocation failure" {
+    inline for (.{ hash.Family.hyperplane, hash.Family.cross_polytope }) |f| {
+        try std.testing.checkAllAllocationFailures(std.testing.allocator, buildAlloc, .{f});
+    }
 }

@@ -24,7 +24,7 @@ fn invariants(_: void, smith: *Smith) anyerror!void {
     var data: [20 * 33]f32 = undefined;
     for (data[0 .. n * d]) |*x| x.* = @as(f32, @floatFromInt(smith.value(i16))) / 1024;
     const family: hash.Family = if (smith.value(bool)) .hyperplane else .cross_polytope;
-    const padded = @import("rotate.zig").paddedLen(d);
+    const padded = try @import("rotate.zig").paddedLen(d);
     const k: u8 = switch (family) {
         .hyperplane => @intCast(upTo(smith, 1, @min(64, padded))),
         .cross_polytope => @intCast(upTo(smith, 1, @as(usize, 64) / @as(usize, std.math.log2_int(usize, 2 * padded)))),
@@ -32,7 +32,7 @@ fn invariants(_: void, smith: *Smith) anyerror!void {
     const params: hash.Params = .{ .family = family, .k = k, .tables = @intCast(upTo(smith, 1, 3)), .seed = smith.value(u64) };
     const ix = try index.build(gpa, data[0 .. n * d], d, params);
     defer ix.deinit(gpa);
-    const h = try hash.Hasher.init(gpa, d, params);
+    var h = try hash.Hasher.init(gpa, d, params);
     defer h.deinit(gpa);
     const probes = upTo(smith, 0, 6);
     var doubled: [33]f32 = undefined;
@@ -41,9 +41,9 @@ fn invariants(_: void, smith: *Smith) anyerror!void {
         for (doubled[0..d], x) |*a, b| a.* = 2 * b;
         var keys: [hash.max_probes]u64 = undefined;
         for (0..params.tables) |t| {
-            const key = h.key(x, @intCast(t));
-            try std.testing.expectEqual(key, h.key(x, @intCast(t)));
-            try std.testing.expectEqual(key, h.key(doubled[0..d], @intCast(t)));
+            const key = try h.key(x, @intCast(t));
+            try std.testing.expectEqual(key, try h.key(x, @intCast(t)));
+            try std.testing.expectEqual(key, try h.key(doubled[0..d], @intCast(t)));
             const got = try h.probes(x, @intCast(t), keys[0 .. probes + 1]);
             try std.testing.expect(got >= 1 and got <= probes + 1);
             try std.testing.expectEqual(key, keys[0]);
