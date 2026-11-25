@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.3 - 2026-11-25
+
+- Reject non-finite inputs (`error.NonFiniteValue`) and out-of-range table indices (`error.TableOutOfRange`) in `Hasher` and `index`, and make `altLess` total-ordered.
+- Validate `Index` invariants in `candidates` and guard `Index.bucket`.
+- Fix CLI `probes` overflow, validate ragged rows before allocation, and fix 32-bit shift portability.
+- Use single-pass top-(want+1) probe selection with precomputed `inv_unit` and narrowed `Index.bucket` lookup.
+
 ## 0.1.2 - 2026-10-25
 
 - `Hasher.key` and `Hasher.probes` take `*Hasher`, since they write into the hasher's buffer, and return errors. Callers declare the hasher with `var` and use `try`. New `Hasher.keyWith`, `Hasher.probesWith` and `Hasher.scratchLen` only read the hasher and use a caller-supplied scratch buffer, so one hasher can serve several threads.

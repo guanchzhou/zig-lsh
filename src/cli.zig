@@ -36,11 +36,12 @@ fn flatten(arena: std.mem.Allocator, rows: []const []const f32, what: []const u8
     if (rows.len == 0) fail("{s} needs at least one row", .{what});
     const d = rows[0].len;
     if (d == 0) fail("{s} rows must not be empty", .{what});
-    const data = try arena.alloc(f32, rows.len * d);
     for (rows, 0..) |r, i| {
         if (r.len != d) fail("{s} row {d} has {d} values, expected {d}", .{ what, i, r.len, d });
-        @memcpy(data[i * d ..][0..d], r);
     }
+    const total = std.math.mul(usize, rows.len, d) catch fail("{s} dimensions overflow", .{what});
+    const data = try arena.alloc(f32, total);
+    for (rows, 0..) |r, i| @memcpy(data[i * d ..][0..d], r);
     return .{ .data = data, .d = d };
 }
 
@@ -116,7 +117,7 @@ pub fn main(init: std.process.Init) !void {
     const m = try flatten(arena, in.data, "data");
     const params: hash.Params = .{ .family = familyOf(in.family), .k = in.k, .tables = in.tables, .seed = seedOf(in.seed) };
     hash.validate(params, m.d) catch |e| fail("{s}", .{@errorName(e)});
-    if (in.probes + 1 > hash.max_probes) fail("probes must be at most {d}", .{hash.max_probes - 1});
+    if (in.probes >= hash.max_probes) fail("probes must be at most {d}", .{hash.max_probes - 1});
 
     if (std.mem.eql(u8, cmd, "keys")) {
         var h = try hash.Hasher.init(arena, m.d, params);

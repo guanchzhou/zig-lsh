@@ -17,6 +17,7 @@ pub const cases = [_]Case{
     .{ .name = "error: ragged rows", .args = &.{"keys"}, .stdin = "{\"data\":[[1,2],[3]]}", .stderr = "data row 1 has 1 values, expected 2", .exit = 1 },
     .{ .name = "error: query width", .args = &.{"search"}, .stdin = "{\"data\":[[1,2]],\"queries\":[[1]],\"k\":1}", .stderr = "queries have 1 values, data has 2", .exit = 1 },
     .{ .name = "error: too many probes", .args = &.{"keys"}, .stdin = "{\"data\":[[1,2]],\"k\":1,\"probes\":65}", .stderr = "probes must be at most 64", .exit = 1 },
+    .{ .name = "error: probes maxInt overflow", .args = &.{"keys"}, .stdin = "{\"data\":[[1,2]],\"k\":1,\"probes\":18446744073709551615}", .stderr = "probes must be at most 64", .exit = 1 },
     .{ .name = "error: truncated JSON", .args = &.{"keys"}, .stdin = "{", .stderr = "invalid input", .exit = 1 },
     .{ .name = "error: unknown command", .args = &.{"bogus"}, .stderr = "unknown command: bogus", .exit = 2 },
     .{ .name = "error: no command prints usage", .args = &.{}, .stderr = "usage: zig-lsh COMMAND", .exit = 2 },

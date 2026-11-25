@@ -64,11 +64,12 @@ pub fn applyInPlace(seed: u64, y: []f64) Error!void {
 }
 
 fn transform(seed: u64, y: []f64) void {
-    const n = y.len;
-    const scale = 1.0 / @sqrt(@as(f64, @floatFromInt(n)));
+    const n: u64 = y.len;
+    const scale = 1.0 / @sqrt(@as(f64, @floatFromInt(y.len)));
     for (0..rounds) |r| {
+        const round_base = @as(u64, r) *% n;
         for (y, 0..) |*v, i| {
-            if (splitmix64(seed, r *% n +% i) & 1 == 1) v.* = -v.*;
+            if (splitmix64(seed, round_base +% @as(u64, i)) & 1 == 1) v.* = -v.*;
         }
         fwht(y);
         for (y) |*v| v.* *= scale;
@@ -98,9 +99,10 @@ test "orthogonal: preserves norms and inner products" {
 }
 
 test "paddedLen and apply reject sizes they cannot handle" {
+    const max_pow2: usize = @as(usize, 1) << (@bitSizeOf(usize) - 1);
     try std.testing.expectEqual(@as(usize, 2), try paddedLen(0));
-    try std.testing.expectEqual(@as(usize, 1) << 63, try paddedLen((@as(usize, 1) << 63) - 1));
-    try std.testing.expectError(error.DimensionTooLarge, paddedLen((@as(usize, 1) << 63) + 1));
+    try std.testing.expectEqual(max_pow2, try paddedLen(max_pow2 - 1));
+    try std.testing.expectError(error.DimensionTooLarge, paddedLen(max_pow2 + 1));
     try std.testing.expectError(error.DimensionTooLarge, paddedLen(std.math.maxInt(usize)));
     var y: [4]f64 = undefined;
     try std.testing.expectError(error.DimensionMismatch, apply(1, &.{ 1, 2, 3 }, y[0..3]));

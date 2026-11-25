@@ -20,10 +20,18 @@ pub const Index = struct {
 
     /// Entries of `table` whose key is `key`.
     pub fn bucket(self: Index, table: u32, key: u64) []const Entry {
+        if (table >= self.tables.len) return &.{};
         const t = self.tables[table];
         const lo = std.sort.lowerBound(Entry, t, key, cmpKey);
-        const hi = std.sort.upperBound(Entry, t, key, cmpKey);
-        return t[lo..hi];
+        if (lo == t.len or t[lo].key != key) return &.{};
+        const tail = t[lo..];
+        const probe_limit = @min(tail.len, 16);
+        var hi: usize = 1;
+        while (hi < probe_limit and tail[hi].key == key) : (hi += 1) {}
+        if (hi == probe_limit and hi < tail.len and tail[hi].key == key) {
+            hi += std.sort.upperBound(Entry, tail[hi..], key, cmpKey);
+        }
+        return tail[0..hi];
     }
 };
 
@@ -35,12 +43,13 @@ fn entryLess(_: void, a: Entry, b: Entry) bool {
     return a.key < b.key or (a.key == b.key and a.id < b.id);
 }
 
-pub const Error = error{ RaggedData, TooManyVectors } || hash.Error || std.mem.Allocator.Error;
+pub const Error = error{ RaggedData, TooManyVectors, InvalidIndex } || hash.Error || std.mem.Allocator.Error;
 
 /// Hashes the `data.len / dims` row-major vectors of `data` into `params.tables` tables.
 pub fn build(gpa: std.mem.Allocator, data: []const f32, dims: usize, params: hash.Params) Error!Index {
     try hash.validate(params, dims);
     if (data.len % dims != 0) return error.RaggedData;
+    for (data) |v| if (!std.math.isFinite(v)) return error.NonFiniteValue;
     const n = data.len / dims;
     if (n > std.math.maxInt(u32)) return error.TooManyVectors;
     var h = try hash.Hasher.init(gpa, dims, params);
@@ -67,6 +76,8 @@ pub fn build(gpa: std.mem.Allocator, data: []const f32, dims: usize, params: has
 pub fn candidates(gpa: std.mem.Allocator, ix: Index, x: []const f32, probes: usize) Error![]u32 {
     if (probes >= hash.max_probes) return error.TooManyProbes;
     if (x.len != ix.dims) return error.DimensionMismatch;
+    if (ix.tables.len != ix.params.tables) return error.InvalidIndex;
+    for (x) |v| if (!std.math.isFinite(v)) return error.NonFiniteValue;
     var h = try hash.Hasher.init(gpa, ix.dims, ix.params);
     defer h.deinit(gpa);
     var seen = try std.DynamicBitSetUnmanaged.initEmpty(gpa, ix.n);
@@ -75,7 +86,10 @@ pub fn candidates(gpa: std.mem.Allocator, ix: Index, x: []const f32, probes: usi
     for (0..ix.params.tables) |t| {
         const got = try h.probes(x, @intCast(t), keys[0 .. probes + 1]);
         for (keys[0..got]) |k| {
-            for (ix.bucket(@intCast(t), k)) |e| seen.set(e.id);
+            for (ix.bucket(@intCast(t), k)) |e| {
+                if (e.id >= ix.n) return error.InvalidIndex;
+                seen.set(e.id);
+            }
         }
     }
     const out = try gpa.alloc(u32, seen.count());
@@ -140,4 +154,53 @@ test "build and candidates free everything on allocation failure" {
     inline for (.{ hash.Family.hyperplane, hash.Family.cross_polytope }) |f| {
         try std.testing.checkAllAllocationFailures(std.testing.allocator, buildAlloc, .{f});
     }
+}
+
+test "build and candidates reject non-finite vectors" {
+    const gpa = std.testing.allocator;
+    const params: hash.Params = .{ .family = .hyperplane, .k = 2, .tables = 2, .seed = 1 };
+    try std.testing.expectError(error.NonFiniteValue, build(gpa, &.{ 1, std.math.nan(f32), 0, 1 }, 2, params));
+    try std.testing.expectError(error.NonFiniteValue, build(gpa, &.{ 1, std.math.inf(f32), 0, 1 }, 2, params));
+    const ix = try build(gpa, &.{ 1, 0, 0, 1 }, 2, params);
+    defer ix.deinit(gpa);
+    try std.testing.expectError(error.NonFiniteValue, candidates(gpa, ix, &.{ std.math.nan(f32), 1 }, 0));
+    try std.testing.expectError(error.NonFiniteValue, candidates(gpa, ix, &.{ -std.math.inf(f32), 1 }, 1));
+}
+
+test "bucket bounds and linear/binary lookup sizes" {
+    var entries: [50]Entry = undefined;
+    for (0..3) |i| entries[i] = .{ .key = 10, .id = @intCast(i) };
+    for (3..19) |i| entries[i] = .{ .key = 20, .id = @intCast(i) };
+    for (19..50) |i| entries[i] = .{ .key = 30, .id = @intCast(i) };
+    const tables = [_][]const Entry{&entries};
+    const ix: Index = .{
+        .params = .{ .family = .hyperplane, .k = 1, .tables = 1, .seed = 0 },
+        .dims = 2,
+        .n = 50,
+        .tables = &tables,
+    };
+    try std.testing.expectEqual(@as(usize, 0), ix.bucket(1, 10).len);
+    try std.testing.expectEqual(@as(usize, 0), ix.bucket(std.math.maxInt(u32), 10).len);
+    try std.testing.expectEqual(@as(usize, 0), ix.bucket(0, 15).len);
+    try std.testing.expectEqual(@as(usize, 3), ix.bucket(0, 10).len);
+    try std.testing.expectEqual(@as(usize, 16), ix.bucket(0, 20).len);
+    try std.testing.expectEqual(@as(usize, 31), ix.bucket(0, 30).len);
+}
+
+test "candidates rejects invalid table count and out-of-range entry ids" {
+    const gpa = std.testing.allocator;
+    const data = [_]f32{ 1, 0, 0, 1 };
+    const ix = try build(gpa, &data, 2, .{ .family = .hyperplane, .k = 2, .tables = 2, .seed = 1 });
+    defer ix.deinit(gpa);
+
+    var bad_tables = ix;
+    bad_tables.tables = ix.tables[0..1];
+    try std.testing.expectError(error.InvalidIndex, candidates(gpa, bad_tables, &.{ 1, 0 }, 0));
+
+    const bad_entries = [_]Entry{.{ .key = ix.tables[0][0].key, .id = 99 }};
+    const corrupt_tables = [_][]const Entry{ &bad_entries, ix.tables[1] };
+    var bad_id = ix;
+    bad_id.tables = &corrupt_tables;
+    const hit_vec = data[@as(usize, ix.tables[0][0].id) * 2 ..][0..2];
+    try std.testing.expectError(error.InvalidIndex, candidates(gpa, bad_id, hit_vec, 0));
 }

@@ -29,7 +29,16 @@ pub const Params = struct {
     seed: u64,
 };
 
-pub const Error = error{ DimsZero, KOutOfRange, NoTables, TooManyProbes, DimensionMismatch, ScratchTooSmall } || rotate.Error;
+pub const Error = error{
+    DimsZero,
+    KOutOfRange,
+    NoTables,
+    TooManyProbes,
+    DimensionMismatch,
+    ScratchTooSmall,
+    NonFiniteValue,
+    TableOutOfRange,
+} || rotate.Error;
 
 /// Largest number of probes per table, own key included.
 pub const max_probes = 65;
@@ -41,12 +50,13 @@ fn bitsPerHash(padded: usize) usize {
 
 /// The most probe alternatives any valid `Params` can produce in one table.
 const max_alts = blk: {
+    const max_pow2: usize = @as(usize, 1) << (@bitSizeOf(usize) - 1);
     var most: usize = 64;
     var padded: usize = 2;
     while (true) : (padded *= 2) {
         const k = 64 / bitsPerHash(padded);
         most = @max(most, k * @min(max_probes - 1, padded - 1));
-        if (padded == 1 << 63) break;
+        if (padded == max_pow2) break;
     }
     break :blk most;
 };
@@ -97,14 +107,17 @@ pub const Hasher = struct {
         return rowsOf(self.params) * self.padded;
     }
 
-    /// The hasher with its buffer replaced by `scratch`, after checking `x` and the fields.
-    fn bind(self: Hasher, scratch: []f64, x: []const f32) Error!Hasher {
+    /// The hasher with its buffer replaced by `scratch`, after checking `x`, `table`, and the fields.
+    fn bind(self: Hasher, scratch: []f64, x: []const f32, table: u32) Error!Hasher {
         try validate(self.params, self.dims);
+        if (table >= self.params.tables) return error.TableOutOfRange;
         if (self.padded != try rotate.paddedLen(self.dims)) return error.DimensionMismatch;
         if (x.len != self.dims) return error.DimensionMismatch;
-        if (scratch.len < self.scratchLen()) return error.ScratchTooSmall;
+        for (x) |v| if (!std.math.isFinite(v)) return error.NonFiniteValue;
+        const needed = std.math.mul(usize, rowsOf(self.params), self.padded) catch return error.DimensionTooLarge;
+        if (scratch.len < needed) return error.ScratchTooSmall;
         var h = self;
-        h.buf = scratch[0..self.scratchLen()];
+        h.buf = scratch[0..needed];
         return h;
     }
 
@@ -118,21 +131,21 @@ pub const Hasher = struct {
 
     /// |v| on a grid of 1e-9 times the vector's norm, so that magnitudes equal in exact
     /// arithmetic compare equal whatever the rounding (padding makes such ties common).
-    fn mag(v: f64, unit: f64) f64 {
-        return @floor(@abs(v) / unit + 0.5);
+    fn mag(v: f64, inv_unit: f64) f64 {
+        return @floor(@abs(v) * inv_unit + 0.5);
     }
 
-    fn unitOf(y: []const f64) f64 {
+    fn invUnitOf(y: []const f64) f64 {
         var s: f64 = 0;
         for (y) |v| s += v * v;
-        return if (s == 0) 1 else 1e-9 * @sqrt(s);
+        return if (s == 0) 1 else 1.0 / (1e-9 * @sqrt(s));
     }
 
-    fn argmaxWithUnit(y: []const f64, u: f64) usize {
+    fn argmaxWithInvUnit(y: []const f64, inv_u: f64) usize {
         var best: usize = 0;
-        var best_mag = mag(y[0], u);
+        var best_mag = mag(y[0], inv_u);
         for (y[1..], 1..) |v, i| {
-            const mv = mag(v, u);
+            const mv = mag(v, inv_u);
             if (mv > best_mag) {
                 best = i;
                 best_mag = mv;
@@ -142,7 +155,7 @@ pub const Hasher = struct {
     }
 
     fn argmax(y: []const f64) usize {
-        return argmaxWithUnit(y, unitOf(y));
+        return argmaxWithInvUnit(y, invUnitOf(y));
     }
 
     fn cpHash(y: []const f64, i: usize) u64 {
@@ -174,7 +187,7 @@ pub const Hasher = struct {
 
     /// The key of `x` in `table`, using `scratch` (at least `scratchLen()` values) as the buffer.
     pub fn keyWith(self: Hasher, scratch: []f64, x: []const f32, table: u32) Error!u64 {
-        const h = try self.bind(scratch, x);
+        const h = try self.bind(scratch, x, table);
         try h.fill(x, table);
         return h.keyFilled();
     }
@@ -201,7 +214,10 @@ pub const Hasher = struct {
     const Alt = struct { gap: f64, coord: usize, pos: u8, rank: u8 };
 
     fn altLess(_: void, a: Alt, b: Alt) bool {
-        if (a.gap != b.gap) return a.gap < b.gap;
+        const a_nan = std.math.isNan(a.gap);
+        const b_nan = std.math.isNan(b.gap);
+        if (a_nan != b_nan) return !a_nan;
+        if (!a_nan and a.gap != b.gap) return a.gap < b.gap;
         if (a.pos != b.pos) return a.pos < b.pos;
         return a.rank < b.rank;
     }
@@ -215,55 +231,72 @@ pub const Hasher = struct {
     /// As `probes`, using `scratch` (at least `scratchLen()` values) as the buffer.
     pub fn probesWith(self: Hasher, scratch: []f64, x: []const f32, table: u32, out: []u64) Error!usize {
         if (out.len > max_probes) return error.TooManyProbes;
-        const h = try self.bind(scratch, x);
+        const h = try self.bind(scratch, x, table);
         if (out.len == 0) return 0;
         return h.probesFilled(x, table, out);
     }
 
     fn probesFilled(self: Hasher, x: []const f32, table: u32, out: []u64) Error!usize {
         try self.fill(x, table);
-        out[0] = self.keyFilled();
         const want = out.len - 1;
-        if (want == 0) return 1;
+        if (want == 0) {
+            out[0] = self.keyFilled();
+            return 1;
+        }
         const p = self.params;
         var alts: [max_alts]Alt = undefined;
         var base_hashes: [64]u64 = undefined;
         var count: usize = 0;
         switch (p.family) {
             .hyperplane => {
-                const u = unitOf(self.row(0));
-                for (self.row(0)[0..p.k], 0..) |v, j| {
-                    alts[count] = .{ .gap = mag(v, u), .pos = @intCast(j), .rank = 0, .coord = j };
+                const y = self.row(0);
+                var s: f64 = 0;
+                for (y) |v| s += v * v;
+                const norm = @sqrt(s);
+                const thr = 1e-12 * norm;
+                const inv_u: f64 = if (s == 0) 1 else 1.0 / (1e-9 * norm);
+                var own: u64 = 0;
+                for (y[0..p.k], 0..) |v, j| {
+                    if (v > thr) own |= @as(u64, 1) << @intCast(j);
+                    alts[count] = .{ .gap = mag(v, inv_u), .pos = @intCast(j), .rank = 0, .coord = j };
                     count += 1;
                 }
+                out[0] = own;
             },
             .cross_polytope => {
                 for (0..p.k) |j| {
                     const y = self.row(j);
-                    const u = unitOf(y);
-                    const top = argmaxWithUnit(y, u);
-                    base_hashes[j] = cpHash(y, top);
-                    const top_mag = mag(y[top], u);
-                    // The `want` largest |y_i| other than the maximum, found by repeated selection.
-                    var taken: [max_probes]usize = undefined;
-                    var r: usize = 0;
-                    while (r < want and r + 1 < y.len) : (r += 1) {
-                        var best: ?usize = null;
-                        var best_mag: f64 = -1;
-                        for (y, 0..) |v, i| {
-                            if (i == top) continue;
-                            if (std.mem.indexOfScalar(usize, taken[0..r], i) != null) continue;
-                            const mv = mag(v, u);
-                            if (best == null or mv > best_mag) {
-                                best = i;
-                                best_mag = mv;
-                            }
+                    const inv_u = invUnitOf(y);
+                    const keep = @min(want + 1, y.len);
+                    var top_mags: [max_probes]f64 = undefined;
+                    var top_coords: [max_probes]usize = undefined;
+                    var len: usize = 0;
+                    for (y, 0..) |v, i| {
+                        const mv = mag(v, inv_u);
+                        if (len == keep and mv <= top_mags[keep - 1]) continue;
+                        var pos = if (len < keep) len else keep - 1;
+                        while (pos > 0 and mv > top_mags[pos - 1]) : (pos -= 1) {
+                            top_mags[pos] = top_mags[pos - 1];
+                            top_coords[pos] = top_coords[pos - 1];
                         }
-                        taken[r] = best.?;
-                        alts[count] = .{ .gap = top_mag - best_mag, .pos = @intCast(j), .rank = @intCast(r), .coord = best.? };
+                        top_mags[pos] = mv;
+                        top_coords[pos] = i;
+                        if (len < keep) len += 1;
+                    }
+                    const top = top_coords[0];
+                    const top_mag = top_mags[0];
+                    base_hashes[j] = cpHash(y, top);
+                    for (1..len) |idx| {
+                        alts[count] = .{
+                            .gap = top_mag - top_mags[idx],
+                            .pos = @intCast(j),
+                            .rank = @intCast(idx - 1),
+                            .coord = top_coords[idx],
+                        };
                         count += 1;
                     }
                 }
+                out[0] = self.compose(base_hashes[0..p.k]);
             },
         }
         std.mem.sort(Alt, alts[0..count], {}, altLess);
@@ -334,8 +367,9 @@ test "validation" {
 }
 
 test "validate rejects dimensions whose padding overflows" {
-    try std.testing.expectError(error.DimensionTooLarge, validate(.{ .family = .hyperplane, .k = 8, .tables = 1, .seed = 0 }, (@as(usize, 1) << 63) + 1));
-    try validate(.{ .family = .cross_polytope, .k = 1, .tables = 1, .seed = 0 }, @as(usize, 1) << 63);
+    const max_pow2: usize = @as(usize, 1) << (@bitSizeOf(usize) - 1);
+    try std.testing.expectError(error.DimensionTooLarge, validate(.{ .family = .hyperplane, .k = 8, .tables = 1, .seed = 0 }, max_pow2 + 1));
+    try validate(.{ .family = .cross_polytope, .k = 1, .tables = 1, .seed = 0 }, max_pow2);
 }
 
 test "key and probes reject a vector of the wrong width" {
@@ -387,4 +421,71 @@ test "the probe alternative buffer covers the largest valid table" {
     defer h.deinit(gpa);
     var out: [max_probes]u64 = undefined;
     try std.testing.expectEqual(@as(usize, max_probes), try h.probes(&x, 0, &out));
+}
+
+test "key and probes reject non-finite inputs and out-of-range table indices" {
+    const gpa = std.testing.allocator;
+    const bad_vecs = [_][4]f32{
+        .{ 1, std.math.nan(f32), 0, 0 },
+        .{ 1, std.math.inf(f32), 0, 0 },
+        .{ -std.math.inf(f32), 0, 1, 2 },
+    };
+    inline for (.{ Family.hyperplane, Family.cross_polytope }) |f| {
+        var h = try Hasher.init(gpa, 4, .{ .family = f, .k = 2, .tables = 2, .seed = 9 });
+        defer h.deinit(gpa);
+        var out: [4]u64 = undefined;
+        for (bad_vecs) |v| {
+            try std.testing.expectError(error.NonFiniteValue, h.key(&v, 0));
+            try std.testing.expectError(error.NonFiniteValue, h.probes(&v, 0, &out));
+            try std.testing.expectError(error.NonFiniteValue, h.probes(&v, 0, out[0..0]));
+        }
+        const ok = [_]f32{ 1, 2, 3, 4 };
+        try std.testing.expectError(error.TableOutOfRange, h.key(&ok, 2));
+        try std.testing.expectError(error.TableOutOfRange, h.key(&ok, std.math.maxInt(u32)));
+        try std.testing.expectError(error.TableOutOfRange, h.probes(&ok, 2, &out));
+        try std.testing.expectError(error.TableOutOfRange, h.probes(&ok, 2, out[0..0]));
+    }
+}
+
+test "altLess is a total order even with non-finite gaps" {
+    const nan = std.math.nan(f64);
+    const inf = std.math.inf(f64);
+    var items = [_]Hasher.Alt{
+        .{ .gap = nan, .coord = 0, .pos = 1, .rank = 0 },
+        .{ .gap = inf, .coord = 1, .pos = 0, .rank = 0 },
+        .{ .gap = -inf, .coord = 2, .pos = 0, .rank = 0 },
+        .{ .gap = 1.0, .coord = 3, .pos = 1, .rank = 0 },
+        .{ .gap = nan, .coord = 4, .pos = 0, .rank = 1 },
+        .{ .gap = 1.0, .coord = 5, .pos = 0, .rank = 2 },
+        .{ .gap = nan, .coord = 6, .pos = 0, .rank = 0 },
+    };
+    for (items) |a| {
+        try std.testing.expect(!Hasher.altLess({}, a, a));
+        for (items) |b| {
+            if (Hasher.altLess({}, a, b)) try std.testing.expect(!Hasher.altLess({}, b, a));
+        }
+    }
+    std.mem.sort(Hasher.Alt, &items, {}, Hasher.altLess);
+    try std.testing.expectEqual(@as(usize, 2), items[0].coord);
+    try std.testing.expectEqual(@as(usize, 5), items[1].coord);
+    try std.testing.expectEqual(@as(usize, 3), items[2].coord);
+    try std.testing.expectEqual(@as(usize, 1), items[3].coord);
+    try std.testing.expectEqual(@as(usize, 6), items[4].coord);
+    try std.testing.expectEqual(@as(usize, 4), items[5].coord);
+    try std.testing.expectEqual(@as(usize, 0), items[6].coord);
+}
+
+test "single-pass cross-polytope probes preserve tie order and zero-vector ties" {
+    const gpa = std.testing.allocator;
+    const zeros = [_]f32{ 0, 0, 0, 0, 0 };
+    var h = try Hasher.init(gpa, 5, .{ .family = .cross_polytope, .k = 2, .tables = 1, .seed = 17 });
+    defer h.deinit(gpa);
+    var single: [1]u64 = undefined;
+    try std.testing.expectEqual(@as(usize, 1), try h.probes(&zeros, 0, &single));
+    try std.testing.expectEqual(try h.key(&zeros, 0), single[0]);
+    var many: [15]u64 = undefined;
+    const got = try h.probes(&zeros, 0, &many);
+    try std.testing.expectEqual(@as(usize, 15), got);
+    try std.testing.expectEqual(single[0], many[0]);
+    for (many[0..got], 0..) |a, i| for (many[i + 1 .. got]) |b| try std.testing.expect(a != b);
 }
